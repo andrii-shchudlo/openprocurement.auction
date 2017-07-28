@@ -15,6 +15,7 @@ from pytz import timezone as tz
 from restkit.conn import Connection
 from socketpool import ConnectionPool
 from sse import Sse as PySse
+from pkg_resources import iter_entry_points
 from urlparse import urlparse, urljoin, urlunparse
 
 from .utils import get_mapping
@@ -28,7 +29,6 @@ LIMIT_REPLICATIONS_LIMIT_FUNCTIONS = {
     'any': any,
     'all': all
 }
-
 
 auctions_server = Flask(__name__)
 
@@ -48,7 +48,6 @@ def after_request(response):
 
 @auctions_server.route('/log', methods=['POST'])
 def log():
-
     try:
         data = loads(request.data)
         if "MESSAGE" in data:
@@ -84,48 +83,7 @@ def health():
     return response
 
 
-@auctions_server.route('/tenders/<auction_doc_id>/<path:path>',
-                       methods=['GET', 'POST'])
 def auctions_proxy(auction_doc_id, path):
-    auctions_server.logger.debug('Auction_doc_id: {}'.format(auction_doc_id))
-    proxy_path = auctions_server.proxy_mappings.get(
-        str(auction_doc_id),
-        get_mapping,
-        (auctions_server.config['REDIS'], str(auction_doc_id), False), max_age=60
-    )
-    auctions_server.logger.debug('Proxy path: {}'.format(proxy_path))
-    if proxy_path:
-        request.environ['PATH_INFO'] = '/' + path
-        auctions_server.logger.debug('Start proxy to path: {}'.format(path))
-        return StreamProxy(
-            proxy_path,
-            auction_doc_id=str(auction_doc_id),
-            event_sources_pool=auctions_server.event_sources_pool,
-            event_source_connection_limit=auctions_server.config['event_source_connection_limit'],
-            pool=auctions_server.proxy_connection_pool,
-            backend="gevent"
-        )
-    elif path == 'login' and auction_doc_id in auctions_server.db:
-        if 'X-Forwarded-For' in request.headers:
-            url = urlunparse(
-                urlparse(request.url)._replace(netloc=request.headers['Host'])
-            ).replace('/login', '')
-            auctions_server.logger.info('Redirecting loging path to {}'.format(url))
-            return redirect(url)
-    elif path == 'event_source':
-        events_close = PySse()
-        events_close.add_message("Close", "Disable")
-        return Response(
-            events_close,
-            mimetype='text/event-stream',
-            content_type='text/event-stream'
-        )
-    return abort(404)
-
-
-@auctions_server.route('/esco-tenders/<auction_doc_id>/<path:path>',
-                       methods=['GET', 'POST'])
-def auctions_proxy_esco(auction_doc_id, path):
     auctions_server.logger.debug('Auction_doc_id: {}'.format(auction_doc_id))
     proxy_path = auctions_server.proxy_mappings.get(
         str(auction_doc_id),
@@ -257,4 +215,9 @@ def make_auctions_app(global_conf,
     auctions_server.db = auctions_server.couch_server[auctions_server.config['COUCH_DB']]
     auctions_server.config['HASH_SECRET_KEY'] = hash_secret_key
     sync_design(auctions_server.db)
+
+    for pkg in iter_entry_points('openprocurement.auction.routes'):
+        plugin = pkg.load()
+        plugin(auctions_server)
+
     return auctions_server
